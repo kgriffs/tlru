@@ -10,6 +10,8 @@ When installing under PyPy, be sure to:
 export XXHASH_FORCE_CFFI=1
 ```
 
+Requires Python 3.5 or better.
+
 Legal
 -----
 
