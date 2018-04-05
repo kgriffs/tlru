@@ -1,6 +1,6 @@
 ## tLRU
 
-Time-bound LRU caching library for Python 3 optimized for speed and efficient use of resources.
+Time-bound LRU caching library for Python 3, optimized for speed and efficient use of resources.
 
 __EXPERIMENTAL__: Use at your own risk.
 
