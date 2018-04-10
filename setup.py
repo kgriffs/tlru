@@ -41,6 +41,7 @@ setup(
         'Topic :: Software Development :: Libraries',
         'Programming Language :: Python',
         'Programming Language :: Python :: Implementation :: CPython',
+        'Programming Language :: Python :: Implementation :: PyPy',
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
