@@ -119,7 +119,7 @@ class LRUDict(collections.MutableMapping):
     def incr(self, key, by=1):
         tk = self._timed_key(key)
 
-        new_value = self._store.pop(key, 0) + by
+        new_value = self._store.pop(tk, 0) + by
         self._store[tk] = new_value
 
         if len(self._store) > self._max_items:
