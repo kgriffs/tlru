@@ -116,6 +116,17 @@ class LRUDict(collections.MutableMapping):
     def __len__(self):
         return len(self._store)
 
+    def incr(self, key, by=1):
+        tk = self._timed_key(key)
+
+        new_value = self._store.pop(key, 0) + by
+        self._store[tk] = new_value
+
+        if len(self._store) > self._max_items:
+            self._store.popitem(last=False)
+
+        return new_value
+
     @property
     def size(self):
         return len(self._store)
