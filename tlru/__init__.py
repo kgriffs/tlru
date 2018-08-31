@@ -69,6 +69,10 @@ class LRUDict(collections.MutableMapping):
         self._max_items = max_items
         self._max_ttl = max_ttl
 
+    def __contains__(self, key):
+        """Allows "peeking" to see if the cache contains an item, without changing LRU status."""
+        return self._timed_key(key) in self._store
+
     def __getitem__(self, key):
         tk = self._timed_key(key)
 
@@ -115,6 +119,14 @@ class LRUDict(collections.MutableMapping):
 
     def __len__(self):
         return len(self._store)
+
+    def remove(self, key):
+        """Like del my_lru[my_key] except doesn't raise KeyError."""
+        tk = self._timed_key(key)
+        try:
+            del self._store[tk]
+        except KeyError:
+            pass
 
     def incr(self, key, by=1):
         tk = self._timed_key(key)
@@ -176,6 +188,7 @@ class CompositeCache:
     _LP = 'CompositeCache'
 
     __slots__ = [
+        '_auto_compress',
         '_compression_thresholds',
         '_level1',
         '_level1_max_item_size',
@@ -185,6 +198,7 @@ class CompositeCache:
         '_logger',
         '_max_ttl',
         '_namespace',
+        '_negative_ttl_lru',
     ]
 
     def __init__(
@@ -199,10 +213,20 @@ class CompositeCache:
         # NOTE(kgriffs): Default of 4K helps constrain items to a single memory
         #   page, but it's TBD whether or not this is helpful.
         compression_threshold=(4 * 2**10),
+        auto_compress=None,
+
+        negative_ttl=None,
     ):
         self._namespace = namespace.encode('utf-8')
+        self._auto_compress = auto_compress if auto_compress is not None else True
 
         self._max_ttl = max_ttl
+
+        if negative_ttl:
+            self._negative_ttl_lru = LRUDict(level1_max_items, negative_ttl)
+        else:
+            self._negative_ttl_lru = None
+
         self._level2 = level2rw
 
         self._level1_max_item_size = level1_max_item_size
@@ -219,7 +243,7 @@ class CompositeCache:
         hashed_key = self._hash_key(key)
 
         record = packb(doc)
-        if any(len(record) >= t for t in self._compression_thresholds):
+        if self._auto_compress and any(len(record) >= t for t in self._compression_thresholds):
             # NOTE(kgriffs): It is better to take the time up front to
             #   compress and--as a result--hopefully be able to cache
             #   it, rather than not be able to cache it at all.
@@ -234,8 +258,14 @@ class CompositeCache:
             except Exception as ex:
                 _log.warning('Error while putting item into the L2 cache', exc_info=ex)
 
+        if self._negative_ttl_lru:
+            self._negative_ttl_lru.remove(hashed_key)
+
     def get(self, key):
         hashed_key = self._hash_key(key)
+
+        if self._negative_ttl_lru and hashed_key in self._negative_ttl_lru:
+            return None
 
         try:
             record = self._level1[hashed_key]
@@ -250,6 +280,9 @@ class CompositeCache:
                 self._level1[hashed_key] = record
 
         if record is None:
+            if self._negative_ttl_lru:
+                self._negative_ttl_lru[hashed_key] = True
+
             return None
 
         return unpackb(record)
