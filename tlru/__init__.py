@@ -164,6 +164,14 @@ class LRUDict(collections.MutableMapping):
         return key + b'\n' + ts_bytes
 
 
+class CompositeCacheNOOP:
+    def put(self, key, doc):
+        pass
+
+    def get(self, key):
+        return None
+
+
 class CompositeCache:
     _LP = 'CompositeCache'
 
