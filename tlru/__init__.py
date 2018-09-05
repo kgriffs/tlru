@@ -31,6 +31,30 @@ _log = logging.getLogger('tlru')
 Level2RW = collections.namedtuple('Level2RW', ['r', 'w'])
 
 
+class L2TestCache:
+    def __init__(self):
+        self._store = {}
+
+    def set(self, key, value):
+        self._store[key] = value
+
+    def get(self, key):
+        return self._store.get(key)
+
+    def incr(self, key):
+        try:
+            self._store[key] += 1
+        except KeyError:
+            self._store[key] = 1
+
+        return self._store[key]
+
+    @classmethod
+    def create_level2rw(cls):
+        cache = cls()
+        return Level2RW(cache, cache)
+
+
 def _backoff_on_exception():
     return backoff.on_exception(backoff.expo, Exception, max_tries=5)
 
@@ -183,6 +207,12 @@ class CompositeCacheNOOP:
     def get(self, key):
         return None
 
+    def put_int64(self, key, number):
+        pass
+
+    def get_int64(self, key):
+        return None
+
 
 class CompositeCache:
     _LP = 'CompositeCache'
@@ -195,7 +225,6 @@ class CompositeCache:
         '_level1_max_items',
         '_level2',
         '_level2_max_item_size',
-        '_logger',
         '_max_ttl',
         '_namespace',
         '_negative_ttl_lru',
@@ -287,6 +316,48 @@ class CompositeCache:
 
         return unpackb(record)
 
+    def put_int64(self, key, number):
+        if number is None:
+            raise ValueError('number may not be None')
+
+        hashed_key = self._hash_key(key)
+
+        self._level1[hashed_key] = number
+
+        record = str(number).encode()
+        try:
+            self._l2_put(hashed_key, record)
+        except Exception as ex:
+            _log.warning('Error while putting item into the L2 cache', exc_info=ex)
+
+        if self._negative_ttl_lru:
+            self._negative_ttl_lru.remove(hashed_key)
+
+    def get_int64(self, key):
+        hashed_key = self._hash_key(key)
+
+        if self._negative_ttl_lru and hashed_key in self._negative_ttl_lru:
+            return None
+
+        number = None
+
+        try:
+            number = self._level1[hashed_key]
+        except KeyError:
+            try:
+                record = self._l2_get(hashed_key)
+            except Exception as ex:
+                _log.warning('Error while looking up item in the L2 cache', exc_info=ex)
+            else:
+                number = int(record)
+                self._level1[hashed_key] = number
+
+        if number is None:
+            if self._negative_ttl_lru:
+                self._negative_ttl_lru[hashed_key] = True
+
+        return number
+
     @_backoff_on_exception()
     def _l2_put(self, hashed_key, record):
         self._level2.w.set(hashed_key, record)
@@ -294,6 +365,106 @@ class CompositeCache:
     @_backoff_on_exception()
     def _l2_get(self, hashed_key):
         return self._level2.r.get(hashed_key)
+
+    def _hash_key(self, key):
+        # NOTE(kgriffs): Be extremely cautious about changing this implementation,
+        #   as it will result in invalidating any items in caches, etc. since
+        #   they will now have a different key.
+
+        if not isinstance(key, bytes):
+            key = key.encode('utf-8')
+
+        time_slot = int(time.time() / self._max_ttl)
+
+        # NOTE(kgriffs): Be explicit about the endianness in case we ever
+        #   deploy to mixed architectures.
+        ts_bytes = struct.pack('<I', time_slot)
+
+        # NOTE(kgriffs): Hash it to normalize the length; should be more
+        #   optimal in terms of memory usage and traversal. Also, Redis
+        #   seems to perform slightly better with pre-hashed keys.
+        hash_input = self._namespace + b'\n' + key + b'\n' + ts_bytes
+
+        # NOTE(kgriffs): This is about 2x as fast as sha256 and results in a
+        #   smaller digest. Should be collision-resistant enough for
+        #   use in cache keys (TBD).
+        a = xxh64(hash_input).digest()
+        b = siphash24(b'\x00' * 16, hash_input)
+        digest = (a + b)
+
+        return digest
+
+
+class Level2Counter:
+    _LP = 'Level2Counter'
+
+    __slots__ = [
+        '_level2',
+        '_max_ttl',
+        '_namespace',
+    ]
+
+    def __init__(
+        self,
+        namespace,
+        max_ttl,
+        level2,  # Must implement an incr(key) method on base-10 number string values
+    ):
+        self._namespace = namespace.encode('utf-8')
+        self._max_ttl = max_ttl
+        self._level2 = level2
+
+    def put(self, key, number):
+        if number is None:
+            raise ValueError('number may not be None')
+
+        hashed_key = self._hash_key(key)
+
+        try:
+            self._l2_put(hashed_key, str(number).encode())
+        except Exception as ex:
+            _log.warning('Error while putting item into the L2 cache', exc_info=ex)
+
+    def get(self, key):
+        hashed_key = self._hash_key(key)
+
+        number = None
+
+        try:
+            record = self._l2_get(hashed_key)
+        except Exception as ex:
+            _log.warning('Error while looking up item in the L2 cache', exc_info=ex)
+        else:
+            number = int(record)
+
+        return number
+
+    def incr(self, key):
+        hashed_key = self._hash_key(key)
+
+        number = 1
+
+        try:
+            number = self._l2_incr(hashed_key)
+        except Exception as ex:
+            _log.warning(
+                'Error while incrementing item in the L2 cache; returning default value (1).',
+                exc_info=ex,
+            )
+
+        return number
+
+    @_backoff_on_exception()
+    def _l2_put(self, hashed_key, record):
+        self._level2.set(hashed_key, record)
+
+    @_backoff_on_exception()
+    def _l2_get(self, hashed_key):
+        return self._level2.get(hashed_key)
+
+    @_backoff_on_exception()
+    def _l2_incr(self, hashed_key):
+        return self._level2.incr(hashed_key)
 
     def _hash_key(self, key):
         # NOTE(kgriffs): Be extremely cautious about changing this implementation,
