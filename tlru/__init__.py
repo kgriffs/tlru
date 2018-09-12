@@ -228,6 +228,7 @@ class CompositeCache:
         '_level1',
         '_level1_max_item_size',
         '_level1_max_items',
+        '_level1_pack_items',
         '_level2',
         '_level2_max_item_size',
         '_max_ttl',
@@ -256,6 +257,12 @@ class CompositeCache:
         # NOTE(kgriffs): When provided, this will override max_ttl for the
         #   L1 cache. It must be less than max_ttl if set.
         level1_max_ttl=None,
+
+        # NOTE(kgriffs): If True (the default), items will be serialized in
+        #   the level 1 cache as well as in level 2. When False, items will
+        #   not be packed or compressed in the level 1 cache and
+        #   level1_max_item_size is ignored.
+        level1_pack_items=True,
     ):
         # NOTE(kgriffs): Enforce "least surprise" semantics.
         if level1_max_ttl is not None and level1_max_ttl >= max_ttl:
@@ -282,6 +289,7 @@ class CompositeCache:
         )
 
         self._level1 = LRUDict(level1_max_items, level1_max_ttl)
+        self._level1_pack_items = level1_pack_items
 
     def put(self, key, doc):
         hashed_key = self._hash_key(key)
@@ -293,8 +301,11 @@ class CompositeCache:
             #   it, rather than not be able to cache it at all.
             record = packb(doc, compress=True)
 
-        if len(record) <= self._level1_max_item_size:
-            self._level1[hashed_key] = record
+        if self._level1_pack_items:
+            if len(record) <= self._level1_max_item_size:
+                self._level1[hashed_key] = record
+        else:
+            self._level1[hashed_key] = doc
 
         if len(record) <= self._level2_max_item_size:
             try:
@@ -312,7 +323,12 @@ class CompositeCache:
             return None
 
         try:
-            record = self._level1[hashed_key]
+            record_or_doc = self._level1[hashed_key]
+            if self._level1_pack_items:
+                doc = unpackb(record_or_doc)
+            else:
+                doc = record_or_doc
+
         except KeyError:
             try:
                 record = self._l2_get(hashed_key)
@@ -320,16 +336,21 @@ class CompositeCache:
                 record = None
                 _log.warning('Error while looking up item in the L2 cache', exc_info=ex)
 
-            if record is not None:
-                self._level1[hashed_key] = record
+            if record is None:
+                doc = None
+            else:
+                doc = unpackb(record)
 
-        if record is None:
-            if self._negative_ttl_lru:
-                self._negative_ttl_lru[hashed_key] = True
+                if self._level1_pack_items:
+                    if len(record) <= self._level1_max_item_size:
+                        self._level1[hashed_key] = record
+                else:
+                    self._level1[hashed_key] = doc
 
-            return None
+        if doc is None and self._negative_ttl_lru:
+            self._negative_ttl_lru[hashed_key] = True
 
-        return unpackb(record)
+        return doc
 
     def put_int64(self, key, number):
         if number is None:
