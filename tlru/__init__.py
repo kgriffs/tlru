@@ -77,6 +77,11 @@ class LRUDict(collections.MutableMapping):
 
     On average, items will be valid for max_ttl/2 seconds (when max_ttl is
     specified; otherwise items will only be evicted via the LRU algorithm).
+
+    They key is used as-is to lookup values an internal dict. It may be
+    appended with a timestamp to provide max-ttl support. Regardless,
+    this means the caller should pre-hash keys if they are huge, to reduce
+    memory usage and to potentially improve lookup time.
     """
     __slots__ = [
         '_lru_list',
@@ -244,8 +249,18 @@ class CompositeCache:
         compression_threshold=(4 * 2**10),
         auto_compress=None,
 
+        # TODO(kgriffs): This works better when you can provide a "cache fill"
+        #   callable to use on cache miss.
         negative_ttl=None,
+
+        # NOTE(kgriffs): When provided, this will override max_ttl for the
+        #   L1 cache. It must be less than max_ttl if set.
+        level1_max_ttl=None,
     ):
+        # NOTE(kgriffs): Enforce "least surprise" semantics.
+        if level1_max_ttl is not None and level1_max_ttl >= max_ttl:
+            raise ValueError('level1_max_ttl must be less than max_ttl')
+
         self._namespace = namespace.encode('utf-8')
         self._auto_compress = auto_compress if auto_compress is not None else True
 
@@ -266,7 +281,7 @@ class CompositeCache:
             level2_max_item_size,
         )
 
-        self._level1 = LRUDict(level1_max_items)
+        self._level1 = LRUDict(level1_max_items, level1_max_ttl)
 
     def put(self, key, doc):
         hashed_key = self._hash_key(key)
