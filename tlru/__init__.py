@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import collections
+import collections.abc
 import logging
 import struct
 import time
@@ -66,7 +67,7 @@ class UnsupportedMediaType(Exception):
         self.mtype = mtype
 
 
-class LRUDict(collections.MutableMapping):
+class LRUDict(collections.abc.MutableMapping):
     """
     Note that this is not thread-safe, since we assume it won't be
     used in such an environment. This lets us be a little more performant
