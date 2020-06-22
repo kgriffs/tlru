@@ -66,6 +66,131 @@ class UnsupportedMediaType(Exception):
         self.mtype = mtype
 
 
+class LRUDictStrict(collections.MutableMapping):
+    """
+    Note that this is not thread-safe, since we assume it won't be
+    used in such an environment. This lets us be a little more performant
+    since we don't have to use a lock. Python is typically scaled via
+    multiple processes and async I/O, so most apps should be able to
+    safely use LRUDict (since LRUDict does not perform I/O, its methods
+    will not be preempted by async libraries).
+
+    They key is used as-is to lookup values in an internal dict. It may be
+    appended with a timestamp to provide max-ttl support. Regardless,
+    this means the caller should pre-hash keys if they are huge, to reduce
+    memory usage and to potentially improve lookup time.
+    """
+    __slots__ = [
+        '_lru_list',
+        '_max_items',
+        '_store',
+        '_max_ttl',
+    ]
+
+    def __init__(self, max_items=128, max_ttl=None):
+        if max_items < 1:
+            raise ValueError('max_items must be >= 1')
+
+        self._store = collections.OrderedDict()
+        self._max_items = max_items
+        self._max_ttl = max_ttl
+
+    def __contains__(self, key):
+        """Allows "peeking" to see if the cache contains an item, without changing LRU status."""
+        item = self._store.get(key)
+        if not item:
+            return False
+
+        value, expires_at = item
+        if expires_at and time.time() < expires_at:
+            return False
+
+        return True
+
+    def __getitem__(self, key):
+        try:
+            # NOTE(kgriffs): Remove to ensure the new value is relocated
+            item = self._store.pop(key)
+        except KeyError:
+            raise KeyError(key)
+
+        value, expires_at = item
+        if expires_at and time.time() < expires_at:
+            raise KeyError(key)
+
+        self._store[key] = item
+        return value
+
+    def __setitem__(self, key, value):
+        # NOTE(kgriffs): Remove to ensure the new value is relocated
+        if key in self._store:
+            del self._store[key]
+
+        expires_at = int(time.time() + self._max_ttl) if self._max_ttl else None
+        self._store[key] = (value, expires_at)
+
+        if len(self._store) > self._max_items:
+            self._store.popitem(last=False)
+
+    def __delitem__(self, key):
+        try:
+            del self._store[key]
+        except KeyError:
+            raise KeyError(key)
+
+    def __iter__(self):
+        if not self._max_ttl:
+            for key in self._store:
+                yield key
+        else:
+            for key, item in self._store.items():
+                expires_at = item[1]
+                if expires_at and time.time() < expires_at:
+                    continue
+
+                yield key
+
+    def __len__(self):
+        return len(self._store)
+
+    def remove(self, key):
+        """Like del my_lru[my_key] except doesn't raise KeyError."""
+        try:
+            del self._store[key]
+        except KeyError:
+            pass
+
+    def incr(self, key, by=1):
+        value, expires_at = self._store.pop(key, (0, None))
+        new_value = (value + by)
+        self._store[key] = (new_value, expires_at)
+
+        if len(self._store) > self._max_items:
+            self._store.popitem(last=False)
+
+        return new_value
+
+    @property
+    def size(self):
+        return len(self._store)
+
+    def items(self):
+        # NOTE(kgriffs): Override default items() to avoid reordering
+        #   them when they are accessed.
+        if not self._max_ttl:
+            for key, item in self._store.items():
+                yield key, item[0]
+        else:
+            for key, item in self._store.items():
+                value, expires_at = item
+                if expires_at and time.time() < expires_at:
+                    continue
+
+                yield key, value
+
+    iteritems = items
+
+
 class LRUDict(collections.MutableMapping):
     """
     Note that this is not thread-safe, since we assume it won't be

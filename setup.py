@@ -43,9 +43,9 @@ setup(
         'Programming Language :: Python :: Implementation :: CPython',
         'Programming Language :: Python :: Implementation :: PyPy',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
+        'Programming Language :: Python :: 3.8',
     ],
     author='Kurt Griffiths',
     author_email='mail@kgriffs.com',
@@ -54,5 +54,5 @@ setup(
     setup_requires=['setuptools>=38.6.0'],
     install_requires=REQUIRES,
     tests_require=['pytest', 'coverage'],
-    python_requires='>=3.5',
+    python_requires='>=3.6.2',
 )
